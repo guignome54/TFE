@@ -23,11 +23,12 @@ BROCHE_BOUTON_GAUCHE = 15
 BROCHE_BOUTON_DROIT = 16
 BROCHE_BOUTON_ROUGE = 14
 BROCHE_FEUX_DETRESSE = 17
-
+BROCHE_PAGE = 18
 bouton_gauche = Pin(BROCHE_BOUTON_GAUCHE, Pin.IN, Pin.PULL_UP)
 bouton_droit = Pin(BROCHE_BOUTON_DROIT, Pin.IN, Pin.PULL_UP)
 bouton_rouge = Pin(BROCHE_BOUTON_ROUGE, Pin.IN, Pin.PULL_UP)
 bouton_feux_detresse = Pin(BROCHE_FEUX_DETRESSE, Pin.IN, Pin.PULL_UP)
+bouton_page = Pin(BROCHE_PAGE, Pin.IN, Pin.PULL_UP)
 
 # ----- LCD (I2C) -----
 SDA_PIN = 6
@@ -57,12 +58,14 @@ etat_bouton_gauche = 0
 etat_bouton_droit = 0
 etat_bande_rouge = 0
 etat_bande_detresse = 0
+numPage = 0
 delai_rebond = 200
 
 temps_dernier_appui_gauche = 0
 temps_dernier_appui_droit = 0
 temps_dernier_appui_rouge = 0
 temps_dernier_appuie_detresse = 0
+temps_dernier_appui_page = 0
 
 # ----- Fonctions -----
 def clignoter(timer):
@@ -85,6 +88,16 @@ def passer_neo_gauche():
         indice_neo = INDICE_DEBUT_GAUCHE
     etat_clignotement = False
 
+def ecran_page(numPage) :
+    if numPage == 0:
+        lcd.move_to(2,0)
+        lcd.putstr("Kilometrage")
+    if numPage == 1 :
+        lcd.move_to(2,0)
+        lcd.putstr("consom elec")
+    if numPage == 2 :
+        lcd.move_to(2,0)
+        lcd.putstr("freq crad   ")
 def passer_neo_droit():
     global indice_neo, etat_clignotement
     np[indice_neo] = COULEUR_ETEINT
@@ -121,7 +134,8 @@ def gerer_boutons():
     global etat_bouton_gauche, etat_bouton_droit, mode_clignotement
     global indice_neo, etat_clignotement, timer1, etat_bande_rouge
     global etat_bande_detresse, temps_dernier_appui_gauche, temps_dernier_appui_droit
-    global temps_dernier_appui_rouge, temps_dernier_appuie_detresse
+    global temps_dernier_appui_rouge, temps_dernier_appuie_detresse, temps_dernier_appui_page
+    global numPage
 
     temps_actuel = time.ticks_ms()
 
@@ -129,13 +143,17 @@ def gerer_boutons():
     if etat_bande_detresse == 0 and bouton_gauche.value() == 0:
         if time.ticks_diff(temps_actuel, temps_dernier_appui_gauche) > delai_rebond:
             temps_dernier_appui_gauche = temps_actuel
-            etat_bouton_gauche ^= 1
+            etat_bouton_gauche = 1 - etat_bouton_gauche
             if etat_bouton_gauche == 1:
+                if etat_bouton_droit == 1 :
+                    etat_bouton_droit = 1 - etat_bouton_droit
                 mode_clignotement = 0
                 indice_neo = INDICE_DEBUT_GAUCHE
                 etat_clignotement = True
                 timer1.init(freq=5, mode=Timer.PERIODIC, callback=clignoter)
                 try:
+                    lcd.move_to(15,0)
+                    lcd.putstr(" ")
                     lcd.move_to(0, 0)
                     lcd.putstr("G")  # ← Affiche G pour gauche
                 except OSError as e:
@@ -147,6 +165,7 @@ def gerer_boutons():
                     np[i] = COULEUR_ETEINT
                 np.write()
                 try:
+
                     lcd.move_to(0, 0)
                     lcd.putstr(" ")  # Efface G
                 except OSError as e:
@@ -156,13 +175,17 @@ def gerer_boutons():
     if etat_bande_detresse == 0 and bouton_droit.value() == 0:
         if time.ticks_diff(temps_actuel, temps_dernier_appui_droit) > delai_rebond:
             temps_dernier_appui_droit = temps_actuel
-            etat_bouton_droit ^= 1
+            etat_bouton_droit = 1 - etat_bouton_droit
             if etat_bouton_droit == 1:
+                if etat_bouton_gauche == 1 :
+                    etat_bouton_gauche = 1 - etat_bouton_gauche
                 mode_clignotement = 1
                 indice_neo = INDICE_FIN_DROIT
                 etat_clignotement = True
                 timer1.init(freq=5, mode=Timer.PERIODIC, callback=clignoter)
                 try:
+                    lcd.move_to(0,0)
+                    lcd.putstr(" ")
                     lcd.move_to(15, 0)
                     lcd.putstr("D")  # ← Affiche D pour droit
                 except OSError as e:
@@ -178,7 +201,13 @@ def gerer_boutons():
                     lcd.putstr(" ")  # Efface D
                 except OSError as e:
                     print("Erreur LCD lors de l'effacement de D:", e)
-
+    if bouton_page.value() ==0 :
+        if time.ticks_diff(temps_actuel, temps_dernier_appui_page) > delai_rebond :
+            temps_dernier_appui_page = temps_actuel
+            numPage += 1
+            if numPage == 3 :
+                numPage = 0
+            
     # Bande rouge
     if bouton_rouge.value() == 0:
         if time.ticks_diff(temps_actuel, temps_dernier_appui_rouge) > delai_rebond:
@@ -196,9 +225,9 @@ def gerer_boutons():
                 etat_bouton_gauche = 0
                 try:
                     lcd.move_to(0, 0)
-                    lcd.putstr("G")  # Efface G et D
+                    lcd.putstr("G")  # affiche G et D
                     lcd.move_to(15, 0)
-                    lcd.putstr("D")  # Efface G et D
+                    lcd.putstr("D")  # affiche G et D
                 except OSError as e:
                     print("Erreur LCD lors de l'effacement de G et D:", e)
             else:
@@ -218,6 +247,7 @@ def gerer_boutons():
 # ----- Boucle principale -----
 while True:
     gerer_boutons()
+    ecran_page(numPage)
     if etat_clignotement:
         if mode_clignotement == 0:
             passer_neo_gauche()
