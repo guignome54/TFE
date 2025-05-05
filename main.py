@@ -2,6 +2,12 @@ from machine import Pin, Timer, I2C, PWM
 import neopixel
 import time
 from ssd1306 import SSD1306_I2C
+import bluetooth
+from micropython import const
+from ubinascii import hexlify
+import assioma
+
+
 
 
 # ----- NeoPixel Configuration -----
@@ -11,6 +17,9 @@ np = neopixel.NeoPixel(Pin(2), NOMBRE_NEO)
 BROCHE_PHARE = 19
 NOMBRE_NEO_PHARE = 24
 np_phare = neopixel.NeoPixel(Pin(19), NOMBRE_NEO)
+
+# Adresse MAC de la pédale Assioma-MX2
+target_mac = b'\xE9\xB5\x4A\x31\x63\xB5'  # E9:B5:4A:31:63:B5
 
 COULEUR_ALLUME = (255, 60, 0)
 COULEUR_ETEINT = (0, 0, 0)
@@ -38,9 +47,9 @@ bouton_feux_detresse = Pin(BROCHE_FEUX_DETRESSE, Pin.IN, Pin.PULL_UP)
 bouton_page = Pin(BROCHE_PAGE, Pin.IN, Pin.PULL_UP)
 bouton_arriere = Pin(BROCHE_ARRIERE, Pin.IN, Pin.PULL_UP)
 bouton_reed = Pin(BROCHE_REED, Pin.IN, Pin.PULL_UP)
-bouton_phare = Pin(BROCHE_PHARE,Pin.IN,Pin.PULL_UP)
+bouton_phare = Pin(BROCHE_PHARE, Pin.IN, Pin.PULL_UP)
 
-pwm = PWM(8,144)
+pwm = PWM(Pin(8), freq=144)
 # ----- LCD (I2C) -----
 SDA_PIN = 6
 SCL_PIN = 7
@@ -51,7 +60,6 @@ I2C_COLS = 16
 
 i2c = I2C(I2C_NUMMER, sda=Pin(SDA_PIN), scl=Pin(SCL_PIN), freq=400000)
 oled = SSD1306_I2C(128, 64, i2c)
-
 
 # ----- Globales -----
 timer1 = Timer()
@@ -78,7 +86,18 @@ temps_dernier_appuie_detresse = 0
 temps_dernier_appui_page = 0
 temps_dernier_appui_arriere = 0
 temps_dernier_appui_phare = 0
-clignotant_actif = False # Nouvelle variable pour suivre si un clignotant est actif
+clignotant_actif = False  # Nouvelle variable pour suivre si un clignotant est actif
+
+# Variables pour les données de puissance
+current_power = 0
+current_cadence = 0
+current_heartrate = 0
+ble_connected = False
+ble_hr_connected = False
+
+
+# Créer une instance de AssiomaBLEClient
+assioma_client = assioma.AssiomaBLEClient()
 
 # ----- Fonctions -----
 def clignoter(timer):
@@ -89,9 +108,9 @@ def clignoter(timer):
         np[indice_neo] = COULEUR_ETEINT
 
     np.write()
-    if mode_clignotement == 0 :
+    if mode_clignotement == 0:
         passer_neo_gauche()
-    else :
+    else:
         passer_neo_droit()
     etat_clignotement = not etat_clignotement
 
@@ -99,7 +118,7 @@ def Phare_arrière():
     if phare_arriere_allumer:
         for i in range(NOMBRE_NEO_PHARE):
             np_phare[i] = COULEUR_ROUGE
-    else :
+    else:
         for i in range(NOMBRE_NEO_PHARE):
             np_phare[i] = COULEUR_ETEINT
     np_phare.write()
@@ -121,60 +140,76 @@ def passer_neo_droit():
     etat_clignotement = False
 
 def eteindre_led(debut, fin):
-    for i in range(debut,fin + 1): # Correction ici pour inclure la fin
+    for i in range(min(debut, fin), max(debut, fin) + 1):
         np[i] = COULEUR_ETEINT
     np.write()
-def ecran_page(numPage) :
-    # On redessine la zone où le texte était affiché avec la couleur de fond (ici, noir)
 
+def ecran_page(numPage):
+    # On efface le contenu précédent dans la zone d'affichage des données
+    oled.fill_rect(0, 20, 128, 44, 0)
+    
     if numPage == 0:
-        oled.text("puissance elec-", 1, 20, 1)
-        oled.text("trique", 1, 30, 1)
+        oled.text("Puissance mec:", 1, 20, 1)
+        oled.text(f"{current_power} Watts", 1, 30, 1)
+        oled.show()
+    elif numPage == 1:
+        oled.text("Puissance elec:", 1, 20, 1)
+        # On pourrait calculer la puissance mécanique si nécessaire
+        oled.text("A implementer", 1, 30, 1)
+        oled.show()
+    elif numPage == 2:
+        # Affiche l'état de connexion BLE
+        oled.text("BLE Status:", 1, 20, 1)
+        if ble_connected:
+            oled.text("Assioma: OK", 1, 30, 1)
+        else:
+            oled.text("Assioma: Deconnecte", 1, 30, 1)
+        
+        oled.show()
+    elif numPage == 3:
+        # Nouvelle page pour afficher la fréquence cardiaque
+        oled.text("Frequence Cardiaque:", 1, 20, 1)
+        oled.text(f"{current_heartrate} BPM", 1, 30, 1)
         oled.show()
 
-    elif numPage == 1 :
-        oled.text("puissance mec-", 1, 20, 1)
-        oled.text("anique", 1, 30, 1)
-        oled.show()
-    elif numPage == 2 :
-        pass
 def ecran_clignotant():
-    if etat_bande_detresse == 1 :
+    # Efface la partie supérieure pour les indicateurs
+    oled.fill_rect(0, 0, 128, 16, 0)
+    
+    if etat_bande_detresse == 1:
         oled.fill_rect(1, 1, 10, 10, 1)
         oled.fill_rect(107, 2, 10, 10, 1)
-        oled.text("D",108,1,0)
-        oled.text("G",2,1,0)
+        oled.text("D", 108, 1, 0)
+        oled.text("G", 2, 1, 0)
         oled.show()
-    else :
-        if etat_bouton_gauche == 1 :
+    else:
+        if etat_bouton_gauche == 1:
             oled.fill_rect(1, 1, 10, 10, 1)
-            oled.text("G",2,2,0)
-            oled.show()
-        else :
+            oled.text("G", 2, 2, 0)
+        else:
             oled.fill_rect(1, 1, 10, 10, 0)
-            oled.show()
+            
         if etat_bouton_droit == 1:
             oled.fill_rect(107, 1, 10, 10, 1)
-            oled.text("D",108,2,0)
-            oled.show()
-        else :
+            oled.text("D", 108, 2, 0)
+        else:
             oled.fill_rect(107, 1, 11, 11, 0)
-            oled.show()
-    if phare_avant == 0 :
+    
+    if phare_avant == 0:
         oled.fill_rect(30, 1, 20, 20, 0)
-        oled.show()
-    else :
+    else:
         oled.fill_rect(30, 1, 16, 10, 1)
-        oled.text("PF",31,2,0)
-        oled.show()
-    if phare_arriere_allumer == 1 :
+        oled.text("PF", 31, 2, 0)
+        
+    if phare_arriere_allumer == 1:
         oled.fill_rect(70, 1, 16, 10, 1)
-        oled.text("PR",71,2,0)
-        oled.show()
-    else :
+        oled.text("PR", 71, 2, 0)
+    else:
         oled.fill_rect(70, 1, 20, 20, 0)
-        oled.text("PR",71,2,0)
-        oled.show()
+        oled.text("PR", 71, 2, 0)
+        
+    oled.show()
+
 def gerer_feux_detresse(timer):
     global clignotement_detresse
     if clignotement_detresse:
@@ -196,7 +231,6 @@ def gerer_feux_detresse(timer):
     clignotement_detresse = not clignotement_detresse
 
 def gerer_bande_rouge(timer):
-
     if etat_bande_rouge == 1:
         for i in range(7, 19):
             np[i] = COULEUR_ROUGE
@@ -206,9 +240,9 @@ def gerer_bande_rouge(timer):
     np.write()
 
 def allumer_phare():
-    if phare_avant == 1 :
+    if phare_avant == 1:
         pwm.duty_u16(16000)
-    elif phare_avant == 2 :
+    elif phare_avant == 2:
         pwm.duty_u16(32000)
     elif phare_avant == 3:
         pwm.duty_u16(65535)
@@ -230,7 +264,7 @@ def gerer_boutons(bouton):
             temps_dernier_appui_gauche = temps_actuel
             if etat_bouton_gauche == 0:
                 etat_bouton_gauche = 1
-                etat_bouton_droit = 0 # Éteindre l'autre clignotant
+                etat_bouton_droit = 0  # Éteindre l'autre clignotant
                 mode_clignotement = 0
                 indice_neo = INDICE_DEBUT_GAUCHE
                 etat_clignotement = True
@@ -245,14 +279,13 @@ def gerer_boutons(bouton):
                 clignotant_actif = False
             ecran_clignotant()
             
-
     # Clignotant Droit
     elif bouton == bouton_droit and etat_bande_detresse == 0:
         if time.ticks_diff(temps_actuel, temps_dernier_appui_droit) > delai_rebond:
             temps_dernier_appui_droit = temps_actuel
             if etat_bouton_droit == 0:
                 etat_bouton_droit = 1
-                etat_bouton_gauche = 0 # Éteindre l'autre clignotant
+                etat_bouton_gauche = 0  # Éteindre l'autre clignotant
                 mode_clignotement = 1
                 indice_neo = INDICE_DEBUT_DROIT
                 etat_clignotement = True
@@ -267,13 +300,14 @@ def gerer_boutons(bouton):
             ecran_clignotant()
 
     elif bouton == bouton_page:
-        if time.ticks_diff(temps_actuel, temps_dernier_appui_page) > delai_rebond :
+        if time.ticks_diff(temps_actuel, temps_dernier_appui_page) > delai_rebond:
             temps_dernier_appui_page = temps_actuel
             numPage += 1
             oled.fill(0)
             ecran_clignotant()
-            if numPage == 3 :
+            if numPage == 3:
                 numPage = 0
+            ecran_page(numPage)
 
     # Bande rouge
     elif bouton == bouton_rouge:
@@ -282,7 +316,6 @@ def gerer_boutons(bouton):
             temps_dernier_appui_rouge = temps_actuel
             etat_bande_rouge ^= 1
             
-
     # Feux de détresse
     elif bouton == bouton_feux_detresse:
         if time.ticks_diff(temps_actuel, temps_dernier_appuie_detresse) > delai_rebond:
@@ -302,34 +335,61 @@ def gerer_boutons(bouton):
                 gerer_feux_detresse(timer1)
                 timer1.deinit()
             ecran_clignotant()
+            
     elif bouton == bouton_arriere:
-        if time.ticks_diff(temps_actuel,temps_dernier_appui_arriere) > delai_rebond:
+        if time.ticks_diff(temps_actuel, temps_dernier_appui_arriere) > delai_rebond:
             temps_dernier_appui_arriere = temps_actuel
             phare_arriere_allumer = 1 - phare_arriere_allumer
             Phare_arrière()
             ecran_clignotant()
 
     elif bouton == bouton_phare:
-        if time.ticks_diff(temps_actuel, temps_dernier_appui_phare) > delai_rebond :
+        if time.ticks_diff(temps_actuel, temps_dernier_appui_phare) > delai_rebond:
             temps_dernier_appui_phare = temps_actuel
-            if phare_avant < 3 :
+            if phare_avant < 3:
                 phare_avant += 1
-            else :
+            else:
                 phare_avant = 0
             allumer_phare()
             ecran_clignotant()
 
-bouton_droit.irq(handler=lambda pin: gerer_boutons(pin),trigger=Pin.IRQ_FALLING)
-bouton_gauche.irq(handler=lambda pin: gerer_boutons(pin),trigger=Pin.IRQ_FALLING)
-bouton_rouge.irq(handler=lambda pin: gerer_boutons(pin),trigger=Pin.IRQ_FALLING)
-bouton_feux_detresse.irq(handler=lambda pin: gerer_boutons(pin),trigger=Pin.IRQ_FALLING)
-bouton_page.irq(handler=lambda pin: gerer_boutons(pin),trigger=Pin.IRQ_FALLING)
-bouton_arriere.irq(handler=lambda pin: gerer_boutons(pin),trigger=Pin.IRQ_FALLING)
-bouton_reed.irq(handler=lambda pin: gerer_boutons(pin),trigger=Pin.IRQ_FALLING)
-bouton_phare.irq(handler=lambda pin: gerer_boutons(pin),trigger=Pin.IRQ_FALLING)
+# Configure les interruptions des boutons
+bouton_droit.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
+bouton_gauche.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
+bouton_rouge.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
+bouton_feux_detresse.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
+bouton_page.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
+bouton_arriere.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
+bouton_reed.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
+bouton_phare.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
 
+# Fonction pour mettre à jour l'écran périodiquement
+def update_screen(timer):
+    ecran_page(numPage)
+
+# Initialiser le timer pour rafraîchir l'écran
+timer3.init(freq=1, mode=Timer.PERIODIC, callback=update_screen)
+
+# Initialisation de l'écran
+oled.fill(0)
+ecran_clignotant()
 ecran_page(numPage)
+
+# Démarrer le scan BLE dès le départ
+assioma_client.start_scan()
+
+# Variables pour la gestion BLE dans la boucle principale
+last_ble_check = time.ticks_ms()
+ble_check_interval = 10000  # 10 secondes
+# Tentative de reconnexion BLE si nécessaire
+current_time = time.ticks_ms()
 # ----- Boucle principale -----
 while True:
-    ecran_page(numPage)
-    pass
+    
+    if not ble_connected and time.ticks_diff(current_time, last_ble_check) > ble_check_interval:
+        print("salut")
+        last_ble_check = current_time
+        if not assioma_client.scan_started:
+            assioma_client.start_scan()
+    
+    time.sleep_ms(100)  # Un petit délai pour éviter de surcharger le processeur
