@@ -1,4 +1,4 @@
-from machine import Pin, Timer, I2C, PWM
+from machine import Pin, Timer, I2C, PWM, ADC
 import neopixel
 import time
 from ssd1306 import SSD1306_I2C
@@ -6,6 +6,7 @@ import bluetooth
 from micropython import const
 from ubinascii import hexlify
 import assioma
+import vitesse
 
 
 
@@ -49,6 +50,7 @@ bouton_arriere = Pin(BROCHE_ARRIERE, Pin.IN, Pin.PULL_UP)
 bouton_reed = Pin(BROCHE_REED, Pin.IN, Pin.PULL_UP)
 bouton_phare = Pin(BROCHE_PHARE, Pin.IN, Pin.PULL_UP)
 
+
 pwm = PWM(Pin(8), freq=144)
 # ----- LCD (I2C) -----
 SDA_PIN = 6
@@ -61,11 +63,22 @@ I2C_COLS = 16
 i2c = I2C(I2C_NUMMER, sda=Pin(SDA_PIN), scl=Pin(SCL_PIN), freq=400000)
 oled = SSD1306_I2C(128, 64, i2c)
 
+# ----- Initialisation du capteur de courant ACS712 -----
+BROCHE_ACS712 = 26  # Utiliser GP26 (ADC0)
+adc = ADC(Pin(BROCHE_ACS712))
+
+# ----- Variables pour les mesures de tension -----
+last_voltage = 0
+current_voltage = 0
+current_amperes = 0
+TENSION_OFFSET = 2.540
+SENSIBILITE = 0.066
 # ----- Globales -----
 timer1 = Timer()
 timer2 = Timer()
 timer3 = Timer()
 timer4 = Timer()
+timer5 = Timer()  # Nouveau timer pour mesurer la tension
 mode_clignotement = 0
 etat_clignotement = False
 clignotement_detresse = False
@@ -92,8 +105,16 @@ clignotant_actif = False  # Nouvelle variable pour suivre si un clignotant est a
 current_power = 0
 current_cadence = 0
 current_heartrate = 0
+current_battery = 0
 ble_connected = False
 ble_hr_connected = False
+
+# Variables pour la gestion de reconnexion BLE
+last_ble_check = time.ticks_ms()
+ble_check_interval = 30000  # 30 secondes entre les tentatives de reconnexion
+ble_scan_timeout = 5000     # 5 secondes de scan maximum par tentative
+scan_start_time = 0         # Pour suivre le temps de scan actuel
+is_scanning = False         # Indicateur de scan en cours
 
 
 # Créer une instance de AssiomaBLEClient
@@ -144,33 +165,77 @@ def eteindre_led(debut, fin):
         np[i] = COULEUR_ETEINT
     np.write()
 
+# Fonction pour lire l'ADC avec plusieurs échantillons pour réduire le bruit
+def lire_adc(num_samples=5):
+    total = 0
+    for _ in range(num_samples):
+        total += adc.read_u16()
+    
+    avg_value = total / num_samples
+    tension = (avg_value / 65535) * 3.3
+    
+    # Calculer le courant à partir de la tension
+    courant = (tension - TENSION_OFFSET) / SENSIBILITE
+    courant = abs(courant)
+    
+    return tension, courant
+
+# Fonction pour mettre à jour périodiquement la mesure de tension
+def mise_a_jour_tension(timer):
+    global current_voltage, current_amperes
+    current_voltage, current_amperes = lire_adc()
+
+
 def ecran_page(numPage):
+    global current_power, current_battery, ble_connected, is_scanning, current_voltage
+    
+    # Mise à jour des données depuis le module assioma
+    if assioma_client.conn_handle is not None:
+        current_power = assioma_client.get_current_power()
+        current_battery = assioma_client.get_battery_level()
+        ble_connected = True
+    else:
+        ble_connected = False
+    
     # On efface le contenu précédent dans la zone d'affichage des données
     oled.fill_rect(0, 20, 128, 44, 0)
     
     if numPage == 0:
         oled.text("Puissance mec:", 1, 20, 1)
         oled.text(f"{current_power} Watts", 1, 30, 1)
-        oled.show()
+
     elif numPage == 1:
         oled.text("Puissance elec:", 1, 20, 1)
-        # On pourrait calculer la puissance mécanique si nécessaire
-        oled.text("A implementer", 1, 30, 1)
-        oled.show()
+        oled.text(f"Courant: {current_amperes:.3f}A", 1, 30, 1)
+        
     elif numPage == 2:
         # Affiche l'état de connexion BLE
         oled.text("BLE Status:", 1, 20, 1)
         if ble_connected:
             oled.text("Assioma: OK", 1, 30, 1)
         else:
-            oled.text("Assioma: Deconnecte", 1, 30, 1)
+            if is_scanning:
+                oled.text("Recherche...", 1, 30, 1)
+            else:
+                oled.text("Assioma: Deconnecte", 1, 30, 1)
+                oled.text("Attente 30s...", 1, 40, 1)
         
-        oled.show()
     elif numPage == 3:
-        # Nouvelle page pour afficher la fréquence cardiaque
-        oled.text("Frequence Cardiaque:", 1, 20, 1)
-        oled.text(f"{current_heartrate} BPM", 1, 30, 1)
-        oled.show()
+        speed = vitesse.current_speed if hasattr(vitesse, 'current_speed') else 0
+        # Nouvelle page pour afficher la vitesse
+        oled.text("Vitesse:", 1, 20, 1)
+        oled.text(f"{speed:.2f} km/h", 1, 30, 1)
+
+    elif numPage == 4:
+        oled.text("Batterie pedale:", 1, 20, 1)
+        if ble_connected:
+            oled.text(f"{current_battery}%", 1, 30, 1)
+        else:
+            oled.text("Non disponible", 1, 30, 1)
+    
+    # Important: Appeler show() après avoir modifié l'affichage
+    oled.show()
+    
 
 def ecran_clignotant():
     # Efface la partie supérieure pour les indicateurs
@@ -210,6 +275,14 @@ def ecran_clignotant():
         
     oled.show()
 
+def pedale_info(timer):
+    global current_battery, current_power
+    if assioma_client.conn_handle is not None:
+        assioma_client.read_battery_level()
+        current_battery = assioma_client.get_battery_level()
+        current_power = assioma_client.get_current_power()
+        print(f"Batterie: {current_battery}%, Puissance: {current_power}W")
+
 def gerer_feux_detresse(timer):
     global clignotement_detresse
     if clignotement_detresse:
@@ -248,6 +321,40 @@ def allumer_phare():
         pwm.duty_u16(65535)
     else:
         pwm.duty_u16(0)
+
+# Nouvelle fonction pour gérer les tentatives de connexion BLE
+def gerer_connexion_ble():
+    global last_ble_check, is_scanning, scan_start_time, ble_connected
+    
+    current_time = time.ticks_ms()
+    
+    # Vérifier si nous sommes connectés
+    if assioma_client.conn_handle is not None:
+        ble_connected = True
+        is_scanning = False
+        return True
+    else:
+        ble_connected = False
+    
+    # Si un scan est en cours, vérifier s'il a expiré
+    if is_scanning:
+        if time.ticks_diff(current_time, scan_start_time) > ble_scan_timeout:
+            # Le scan a duré trop longtemps, on l'arrête
+            assioma_client.stop_scan()
+            is_scanning = False
+            print("Scan BLE expiré, attente avant nouvelle tentative")
+            last_ble_check = current_time  # Réinitialiser le timer de contrôle
+    
+    # Si aucun scan n'est en cours et qu'il est temps de vérifier à nouveau
+    elif time.ticks_diff(current_time, last_ble_check) > ble_check_interval:
+        print("Démarrage d'un nouveau scan BLE")
+        assioma_client.stop_scan()  # S'assurer qu'aucun scan précédent n'est actif
+        time.sleep_ms(100)          # Court délai pour stabilisation
+        assioma_client.start_scan()
+        is_scanning = True
+        scan_start_time = current_time
+    
+    return False
 
 def gerer_boutons(bouton):
     global etat_bouton_gauche, etat_bouton_droit, mode_clignotement
@@ -301,11 +408,16 @@ def gerer_boutons(bouton):
 
     elif bouton == bouton_page:
         if time.ticks_diff(temps_actuel, temps_dernier_appui_page) > delai_rebond:
+            # Lecture des informations de pédale à chaque changement de page
+            if assioma_client.conn_handle is not None:
+                assioma_client.read_battery_level()
+                current_battery = assioma_client.get_battery_level()
+                
             temps_dernier_appui_page = temps_actuel
             numPage += 1
             oled.fill(0)
             ecran_clignotant()
-            if numPage == 3:
+            if numPage == 5:
                 numPage = 0
             ecran_page(numPage)
 
@@ -363,12 +475,7 @@ bouton_arriere.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLI
 bouton_reed.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
 bouton_phare.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
 
-# Fonction pour mettre à jour l'écran périodiquement
-def update_screen(timer):
-    ecran_page(numPage)
 
-# Initialiser le timer pour rafraîchir l'écran
-timer3.init(freq=1, mode=Timer.PERIODIC, callback=update_screen)
 
 # Initialisation de l'écran
 oled.fill(0)
@@ -377,19 +484,21 @@ ecran_page(numPage)
 
 # Démarrer le scan BLE dès le départ
 assioma_client.start_scan()
+is_scanning = True
+scan_start_time = time.ticks_ms()
 
-# Variables pour la gestion BLE dans la boucle principale
-last_ble_check = time.ticks_ms()
-ble_check_interval = 10000  # 10 secondes
-# Tentative de reconnexion BLE si nécessaire
-current_time = time.ticks_ms()
-# ----- Boucle principale -----
+# Configuration du timer pour la mise à jour périodique des données de la pédale
+timer3.init(freq=0.2, mode=Timer.PERIODIC, callback=pedale_info)  # Mise à jour toutes les 5 secondes
+
+# Configuration du timer pour la mise à jour périodique de la tension
+timer5.init(freq=2, mode=Timer.PERIODIC, callback=mise_a_jour_tension)  # Mise à jour toutes les 0.5 secondes
+
+# ----- Boucle principale -----a
 while True:
+    # Gestion de la connexion BLE
+    gerer_connexion_ble()
     
-    if not ble_connected and time.ticks_diff(current_time, last_ble_check) > ble_check_interval:
-        print("salut")
-        last_ble_check = current_time
-        if not assioma_client.scan_started:
-            assioma_client.start_scan()
+    # Mise à jour de l'écran
+    ecran_page(numPage)
     
     time.sleep_ms(100)  # Un petit délai pour éviter de surcharger le processeur
