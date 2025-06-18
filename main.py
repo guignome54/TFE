@@ -1,7 +1,10 @@
-from machine import Pin, Timer, I2C, PWM, ADC
+from machine import Pin, Timer, I2C, PWM, ADC, WDT
 import neopixel
 import time
 from ssd1306 import SSD1306_I2C
+
+time.sleep(2)
+
 import bluetooth
 from micropython import const
 from ubinascii import hexlify
@@ -9,15 +12,10 @@ import assioma
 import vitesse
 
 
-
-
 # ----- NeoPixel Configuration -----
-BROCHE_NEO = 2
-NOMBRE_NEO = 26
-np = neopixel.NeoPixel(Pin(2), NOMBRE_NEO)
-BROCHE_PHARE = 19
-NOMBRE_NEO_PHARE = 24
-np_phare = neopixel.NeoPixel(Pin(19), NOMBRE_NEO)
+BROCHE_NEO = 14
+NOMBRE_NEO = 52
+np = neopixel.NeoPixel(Pin(15), NOMBRE_NEO)
 
 # Adresse MAC de la pédale Assioma-MX2
 target_mac = b'\xE9\xB5\x4A\x31\x63\xB5'  # E9:B5:4A:31:63:B5
@@ -32,30 +30,30 @@ INDICE_DEBUT_DROIT = 6
 INDICE_FIN_DROIT = 0
 
 # ----- Boutons -----
-BROCHE_BOUTON_GAUCHE = 15
-BROCHE_BOUTON_DROIT = 16
-BROCHE_BOUTON_ROUGE = 14
-BROCHE_FEUX_DETRESSE = 17
-BROCHE_PAGE = 18
-BROCHE_ARRIERE = 20
+BROCHE_BOUTON_GAUCHE = 2
+BROCHE_BOUTON_DROIT = 0
+BROCHE_FREIN = 7
+BROCHE_FEUX_DETRESSE = 4
+BROCHE_PAGE = 8
+BROCHE_ARRIERE = 6
 BROCHE_REED = 21
-BROCHE_PHARE = 9
-BROCHE_AFFICHAGE_PHARE = 8
+BROCHE_PHARE = 11
+BROCHE_CHRONO = 13
 bouton_gauche = Pin(BROCHE_BOUTON_GAUCHE, Pin.IN, Pin.PULL_UP)
 bouton_droit = Pin(BROCHE_BOUTON_DROIT, Pin.IN, Pin.PULL_UP)
-bouton_rouge = Pin(BROCHE_BOUTON_ROUGE, Pin.IN, Pin.PULL_UP)
+frein = Pin(BROCHE_FREIN, Pin.IN, Pin.PULL_UP)
 bouton_feux_detresse = Pin(BROCHE_FEUX_DETRESSE, Pin.IN, Pin.PULL_UP)
 bouton_page = Pin(BROCHE_PAGE, Pin.IN, Pin.PULL_UP)
 bouton_arriere = Pin(BROCHE_ARRIERE, Pin.IN, Pin.PULL_UP)
 bouton_reed = Pin(BROCHE_REED, Pin.IN, Pin.PULL_UP)
 bouton_phare = Pin(BROCHE_PHARE, Pin.IN, Pin.PULL_UP)
+bouton_chrono = Pin(BROCHE_CHRONO, Pin.IN, Pin.PULL_UP)
 
-
-pwm = PWM(Pin(8), freq=144)
+pwm = PWM(Pin(18), freq=144)
 # ----- LCD (I2C) -----
-SDA_PIN = 6
-SCL_PIN = 7
-I2C_NUMMER = 1
+SDA_PIN = 16
+SCL_PIN = 17
+I2C_NUMMER = 0
 I2C_ADDR = 0x27
 I2C_ROWS = 2
 I2C_COLS = 16
@@ -69,8 +67,9 @@ adc = ADC(Pin(BROCHE_ACS712))
 
 # ----- Variables pour les mesures de tension -----
 last_voltage = 0
-current_voltage = 0
+current_voltage = 40
 current_amperes = 0
+current_battery_voltage = 0
 TENSION_OFFSET = 2.540
 SENSIBILITE = 0.066
 # ----- Globales -----
@@ -99,7 +98,15 @@ temps_dernier_appuie_detresse = 0
 temps_dernier_appui_page = 0
 temps_dernier_appui_arriere = 0
 temps_dernier_appui_phare = 0
+temps_dernier_appui_chrono = 0
+last_pedal_activity = 0 
+pedal_timeout = 3000 
 clignotant_actif = False  # Nouvelle variable pour suivre si un clignotant est actif
+
+# Variables pour le chronometre
+etat_chrono = 0
+chrono_start_time = 0
+chrono_elapsed_time = 0
 
 # Variables pour les données de puissance
 current_power = 0
@@ -123,6 +130,7 @@ assioma_client = assioma.AssiomaBLEClient()
 # ----- Fonctions -----
 def clignoter(timer):
     global indice_neo, etat_clignotement
+
     if etat_clignotement:
         np[indice_neo] = COULEUR_ALLUME
     else:
@@ -137,12 +145,12 @@ def clignoter(timer):
 
 def Phare_arrière():
     if phare_arriere_allumer:
-        for i in range(NOMBRE_NEO_PHARE):
-            np_phare[i] = COULEUR_ROUGE
+        for i in range(26):
+            np[26+i] = COULEUR_ROUGE
     else:
-        for i in range(NOMBRE_NEO_PHARE):
-            np_phare[i] = COULEUR_ETEINT
-    np_phare.write()
+        for i in range(26):
+            np[26+i] = COULEUR_ETEINT
+    np.write()
 
 def passer_neo_gauche():
     global indice_neo, etat_clignotement
@@ -182,12 +190,22 @@ def lire_adc(num_samples=5):
 
 # Fonction pour mettre à jour périodiquement la mesure de tension
 def mise_a_jour_tension(timer):
-    global current_voltage, current_amperes
+    global current_voltage, current_amperes, current_battery_voltage
     current_voltage, current_amperes = lire_adc()
+    # Calculer la tension de la batterie (Courant * 40V)
+    current_battery_voltage = current_amperes * 40
 
+def calculer_tension_batterie():
+    """
+    Calcule la tension de la batterie basée sur le courant mesuré
+    Tension batterie = Courant * 40V
+    """
+    global current_amperes, current_battery_voltage
+    current_battery_voltage = current_amperes * 40
+    return current_battery_voltage
 
 def ecran_page(numPage):
-    global current_power, current_battery, ble_connected, is_scanning, current_voltage
+    global current_power, current_battery, ble_connected, is_scanning, current_voltage, current_battery_voltage
     
     # Mise à jour des données depuis le module assioma
     if assioma_client.conn_handle is not None:
@@ -207,6 +225,8 @@ def ecran_page(numPage):
     elif numPage == 1:
         oled.text("Puissance elec:", 1, 20, 1)
         oled.text(f"Courant: {current_amperes:.3f}A", 1, 30, 1)
+        # Ajouter l'affichage de la tension de la batterie
+        oled.text(f"Puissance: {current_battery_voltage:.1f}W", 1, 40, 1)
         
     elif numPage == 2:
         # Affiche l'état de connexion BLE
@@ -232,6 +252,11 @@ def ecran_page(numPage):
             oled.text(f"{current_battery}%", 1, 30, 1)
         else:
             oled.text("Non disponible", 1, 30, 1)
+    elif numPage == 5:
+        oled.text("Chrono:", 1, 20, 1)
+        minutes = int(chrono_elapsed_time // 60)
+        secondes = int(chrono_elapsed_time % 60)
+        oled.text(f"{minutes:02d}:{secondes:02d}", 1, 30, 1)
     
     # Important: Appeler show() après avoir modifié l'affichage
     oled.show()
@@ -276,12 +301,32 @@ def ecran_clignotant():
     oled.show()
 
 def pedale_info(timer):
-    global current_battery, current_power
+    global current_battery, current_power, last_pedal_activity
+    
+    current_time = time.ticks_ms()
+    
     if assioma_client.conn_handle is not None:
         assioma_client.read_battery_level()
         current_battery = assioma_client.get_battery_level()
-        current_power = assioma_client.get_current_power()
-        print(f"Batterie: {current_battery}%, Puissance: {current_power}W")
+        
+        # Lire la puissance actuelle
+        new_power = assioma_client.get_current_power()
+        
+        # Si la puissance est supérieure à 0, mettre à jour le timestamp d'activité
+        if new_power > 0:
+            current_power = new_power
+            last_pedal_activity = current_time
+        else:
+            # Vérifier si il n'y a pas eu d'activité depuis 3 secondes
+            if time.ticks_diff(current_time, last_pedal_activity) > pedal_timeout:
+                current_power = 0
+            # Sinon, garder la dernière valeur de puissance
+        
+    else:
+        # Si pas de connexion, remettre la puissance à 0
+        current_power = 0
+    
+    wdt.feed()
 
 def gerer_feux_detresse(timer):
     global clignotement_detresse
@@ -342,7 +387,6 @@ def gerer_connexion_ble():
             # Le scan a duré trop longtemps, on l'arrête
             assioma_client.stop_scan()
             is_scanning = False
-            print("Scan BLE expiré, attente avant nouvelle tentative")
             last_ble_check = current_time  # Réinitialiser le timer de contrôle
     
     # Si aucun scan n'est en cours et qu'il est temps de vérifier à nouveau
@@ -356,15 +400,19 @@ def gerer_connexion_ble():
     
     return False
 
+def mettre_a_jour_chronometre(timer):
+    global chrono_elapsed_time, chrono_start_time
+    chrono_elapsed_time = time.time() - chrono_start_time
+
 def gerer_boutons(bouton):
     global etat_bouton_gauche, etat_bouton_droit, mode_clignotement
     global indice_neo, etat_clignotement, timer1, etat_bande_rouge
     global etat_bande_detresse, temps_dernier_appui_gauche, temps_dernier_appui_droit
     global temps_dernier_appui_rouge, temps_dernier_appuie_detresse, temps_dernier_appui_page
     global numPage, timer2, temps_dernier_appui_arriere, phare_arriere_allumer, phare_avant
-    global temps_dernier_appui_phare, clignotant_actif
+    global temps_dernier_appui_phare, clignotant_actif, temps_dernier_appui_chrono
+    global chrono_elapsed_time, chrono_start_time, etat_chrono
     temps_actuel = time.ticks_ms()
-
     # Clignotant Gauche
     if bouton == bouton_gauche and etat_bande_detresse == 0:
         if time.ticks_diff(temps_actuel, temps_dernier_appui_gauche) > delai_rebond:
@@ -398,6 +446,7 @@ def gerer_boutons(bouton):
                 etat_clignotement = True
                 timer1.init(freq=4, mode=Timer.PERIODIC, callback=clignoter)
                 clignotant_actif = True
+               
             else:
                 etat_bouton_droit = 0
                 etat_clignotement = False
@@ -417,17 +466,16 @@ def gerer_boutons(bouton):
             numPage += 1
             oled.fill(0)
             ecran_clignotant()
-            if numPage == 5:
+            if numPage == 6:
                 numPage = 0
             ecran_page(numPage)
 
     # Bande rouge
-    elif bouton == bouton_rouge:
-        if time.ticks_diff(temps_actuel, temps_dernier_appui_rouge) > delai_rebond:
-            timer2.init(freq=6, mode=Timer.PERIODIC, callback=gerer_bande_rouge)
-            temps_dernier_appui_rouge = temps_actuel
-            etat_bande_rouge ^= 1
-            
+    elif bouton == frein:
+        timer2.init(freq=6, mode=Timer.PERIODIC, callback=gerer_bande_rouge)
+        temps_dernier_appui_rouge = temps_actuel
+        etat_bande_rouge ^= 1
+        
     # Feux de détresse
     elif bouton == bouton_feux_detresse:
         if time.ticks_diff(temps_actuel, temps_dernier_appuie_detresse) > delai_rebond:
@@ -465,16 +513,27 @@ def gerer_boutons(bouton):
             allumer_phare()
             ecran_clignotant()
 
+    elif bouton == bouton_chrono:
+        if time.ticks_diff(temps_actuel, temps_dernier_appui_chrono) > delai_rebond:
+            temps_dernier_appui_chrono = temps_actuel
+            etat_chrono = 1 - etat_chrono
+            if etat_chrono:
+                chrono_start_time = time.time()
+                chrono_elapsed_time = 0
+                timer4.init(freq=1, mode=Timer.PERIODIC, callback=mettre_a_jour_chronometre)
+            else:
+                timer4.deinit()
+
 # Configure les interruptions des boutons
 bouton_droit.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
 bouton_gauche.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
-bouton_rouge.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
+frein.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING)
 bouton_feux_detresse.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
 bouton_page.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
 bouton_arriere.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
 bouton_reed.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
 bouton_phare.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
-
+bouton_chrono.irq(handler=lambda pin: gerer_boutons(pin), trigger=Pin.IRQ_FALLING)
 
 
 # Initialisation de l'écran
@@ -482,16 +541,17 @@ oled.fill(0)
 ecran_clignotant()
 ecran_page(numPage)
 
+wdt = WDT(timeout=8000)
 # Démarrer le scan BLE dès le départ
 assioma_client.start_scan()
 is_scanning = True
 scan_start_time = time.ticks_ms()
 
 # Configuration du timer pour la mise à jour périodique des données de la pédale
-timer3.init(freq=0.2, mode=Timer.PERIODIC, callback=pedale_info)  # Mise à jour toutes les 5 secondes
+timer3.init(freq=10, mode=Timer.PERIODIC, callback=pedale_info)  # Mise à jour toutes les 5 secondes
 
 # Configuration du timer pour la mise à jour périodique de la tension
-timer5.init(freq=2, mode=Timer.PERIODIC, callback=mise_a_jour_tension)  # Mise à jour toutes les 0.5 secondes
+timer5.init(freq=0.5, mode=Timer.PERIODIC, callback=mise_a_jour_tension)  # Mise à jour toutes les 0.5 secondes
 
 # ----- Boucle principale -----a
 while True:
@@ -501,4 +561,5 @@ while True:
     # Mise à jour de l'écran
     ecran_page(numPage)
     
+    wdt.feed()
     time.sleep_ms(100)  # Un petit délai pour éviter de surcharger le processeur

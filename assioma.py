@@ -58,14 +58,12 @@ class AssiomaBLEClient:
     def start_scan(self):
         """Démarre le scan pour trouver la pédale Assioma"""
         if not self.scan_started:
-            print("Démarrage du scan pour Assioma...")
             self.ble.gap_scan(10000, 30000, 30000)
             self.scan_started = True
             
     def stop_scan(self):
         """Arrête le scan BLE en cours"""
         if self.scan_started:
-            print("Arrêt du scan BLE...")
             self.ble.gap_scan(None)
             self.scan_started = False
             self._scan_done = True
@@ -86,12 +84,10 @@ class AssiomaBLEClient:
             elif event == _IRQ_SCAN_DONE:
                 self._scan_done = True
                 self.scan_started = False
-                if not self._connecting:
-                    print("Scan terminé. Aucune pédale Assioma trouvée.")
+
 
             elif event == _IRQ_PERIPHERAL_CONNECT:
                 conn_handle, addr_type, addr = data
-                print("Connecté à la pédale Assioma")
                 global ble_connected
                 ble_connected = True
                 self.conn_handle = conn_handle
@@ -101,7 +97,6 @@ class AssiomaBLEClient:
 
             elif event == _IRQ_PERIPHERAL_DISCONNECT:
                 conn_handle, _, _ = data
-                print("Déconnecté de la pédale Assioma")
                 global ble_connected
                 ble_connected = False
                 self._reset_state()
@@ -109,11 +104,9 @@ class AssiomaBLEClient:
             elif event == _IRQ_GATTC_SERVICE_RESULT:
                 conn_handle, start_handle, end_handle, uuid = data
                 if uuid == CPM_SERVICE_UUID:
-                    print("Service Cycling Power trouvé")
                     self._cpm_service_start_handle = start_handle
                     self._cpm_service_end_handle = end_handle
                 elif uuid == BATTERY_SERVICE_UUID:
-                    print("Service Battery trouvé")
                     self._battery_service_start_handle = start_handle
                     self._battery_service_end_handle = end_handle
 
@@ -127,12 +120,10 @@ class AssiomaBLEClient:
             elif event == _IRQ_GATTC_CHARACTERISTIC_RESULT:
                 conn_handle, def_handle, value_handle, properties, uuid = data
                 if uuid == CPM_MEASUREMENT_UUID:
-                    print("Caractéristique de mesure de puissance trouvée")
                     self.cpm_measurement_handle = value_handle
                     # Stocker le handle CCCD (pour les notifications)
                     self.cccd_handles[self.cpm_measurement_handle] = value_handle + 1
                 elif uuid == BATTERY_LEVEL_UUID:
-                    print("Caractéristique de niveau de batterie trouvée")
                     self.battery_level_handle = value_handle
                     # Stocker le handle CCCD (pour les notifications optionnelles)
                     self.cccd_handles[self.battery_level_handle] = value_handle + 1
@@ -168,7 +159,6 @@ class AssiomaBLEClient:
             elif event == _IRQ_GATTC_WRITE_DONE:
                 conn_handle, value_handle, status = data
                 self._write_pending = False
-                print("Notifications activées ?")
 
             elif event == _IRQ_GATTC_NOTIFY:
                 conn_handle, value_handle, notify_data = data
@@ -223,7 +213,6 @@ class AssiomaBLEClient:
             return
             
         try:
-            print("Découverte des services...")
             self._discovering_services = True
             self.ble.gattc_discover_services(self.conn_handle)
         except Exception as e:
@@ -236,7 +225,6 @@ class AssiomaBLEClient:
             return
             
         try:
-            print(f"Découverte caractéristiques de {start_handle} à {end_handle}...")
             self._discovering_chars = True
             self.ble.gattc_discover_characteristics(self.conn_handle, start_handle, end_handle)
         except Exception as e:
@@ -250,7 +238,6 @@ class AssiomaBLEClient:
             
         # Activer les notifications pour la mesure de puissance
         if self.cpm_measurement_handle and self.cpm_measurement_handle in self.cccd_handles:
-            print("Configuration des notifications de puissance...")
             cccd_handle = self.cccd_handles[self.cpm_measurement_handle]
             try:
                 self._write_pending = True
@@ -265,7 +252,6 @@ class AssiomaBLEClient:
             return
             
         try:
-            print("Lecture du niveau de batterie...")
             self._read_pending = True
             self.ble.gattc_read(self.conn_handle, self.battery_level_handle)
         except Exception as e:
